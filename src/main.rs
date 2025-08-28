@@ -1,4 +1,5 @@
 use bindings::region::{*, UserModerationPolicy::*};
+use bindings::ext::con::*;
 use bindings::sdk::{DbContext, Table, Timestamp};
 
 mod glue;
@@ -47,10 +48,14 @@ async fn main() {
 
     let (tx, rx) = unbounded_channel::<Message>();
 
+    let tx_shutdown = tx.clone();
     let ctx = DbConnection::builder()
         .configure(&config)
         .on_connect(|_, _, _| println!("connected!"))
-        .on_disconnect(|_, _| println!("disconnected!"))
+        .on_disconnect(move |_, _| {
+            println!("disconnected!");
+            tx_shutdown.send(Message::Disconnect).unwrap();
+        })
         .build()
         .expect("failed to connect");
 
@@ -73,21 +78,12 @@ async fn main() {
                    WHERE t.created_time > '{}'", start),
     ]);
 
-    let mut producer = Box::pin(ctx.run_async());
-    let consumer = tokio::spawn(consume(rx, config.webhook_url()));
+    let (con, _) = tokio::join!(
+        tokio::spawn(ctx.run_until(tokio::signal::ctrl_c())),
+        tokio::spawn(consume(rx, config.webhook_url())),
+    );
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            ctx.disconnect().unwrap();
-            producer.await.unwrap();
-            tx.send(Message::Disconnect).unwrap();
-            consumer.await.unwrap();
-        },
-        _ = &mut producer => {
-            tx.send(Message::Disconnect).unwrap();
-            consumer.await.unwrap();
-        },
-    }
+    if let Ok(Err(e)) = con { eprintln!("db error: {:?}", e); }
 }
 
 fn on_message(ctx: &EventContext, row: &ChatMessageState, tx: &UnboundedSender<Message>) {
