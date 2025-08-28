@@ -241,7 +241,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "spacetimedb-sdk",
  "tokio",
 ]
 

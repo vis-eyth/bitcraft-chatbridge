@@ -1,10 +1,10 @@
 use bindings::region::{*, UserModerationPolicy::*};
+use bindings::sdk::{DbContext, Table, Timestamp};
 
 mod glue;
 use glue::{Config, Configurable, with_channel};
 
 use serde;
-use spacetimedb_sdk::{DbContext, Table, Timestamp};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(serde::Serialize)]
