@@ -1,12 +1,12 @@
 use bindings::region::{*, UserModerationPolicy::*};
-use bindings::ext::con::*;
-use bindings::sdk::{DbContext, Table, Timestamp};
+use bindings::ext::{con::*, send::*};
+use bindings::sdk::{DbContext, Timestamp};
 
 mod glue;
-use glue::{Config, Configurable, with_channel};
+use glue::{Config, Configurable};
 
 use serde;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 #[derive(serde::Serialize)]
 #[serde(untagged)]
@@ -59,8 +59,8 @@ async fn main() {
         .build()
         .expect("failed to connect");
 
-    ctx.db.chat_message_state().on_insert(with_channel(tx.clone(), on_message));
-    ctx.db.user_moderation_state().on_insert(with_channel(tx.clone(), on_moderation));
+    ctx.db.chat_message_state().on_insert_send(&tx, on_message);
+    ctx.db.user_moderation_state().on_insert_send(&tx, on_moderation);
 
     let start = Timestamp::now();
     ctx.subscription_builder()
@@ -86,65 +86,47 @@ async fn main() {
     if let Ok(Err(e)) = con { eprintln!("db error: {:?}", e); }
 }
 
-fn on_message(ctx: &EventContext, row: &ChatMessageState, tx: &UnboundedSender<Message>) {
-    let row = row.clone();
-
+fn on_message(ctx: &EventContext, row: &ChatMessageState) -> Option<Message> {
     const EMPIRE_INTERNAL: i32 = ChatChannel::EmpireInternal as i32;
     const EMPIRE_PUBLIC: i32 = ChatChannel::EmpirePublic as i32;
     const CLAIM: i32 = ChatChannel::Claim as i32;
     const REGION: i32 = ChatChannel::Region as i32;
 
     match row.channel_id {
-        EMPIRE_INTERNAL | EMPIRE_PUBLIC => {
-            let empire = ctx.db.empire_state()
+        EMPIRE_INTERNAL | EMPIRE_PUBLIC =>
+            ctx.db.empire_state()
                 .entity_id()
                 .find(&row.target_id)
-                .map(|e| e.name);
-
-            if let Some(empire) = empire {
-                tx.send(Message::empire(row.username, empire, row.text)).unwrap();
-            } else {
-                eprintln!("no empire found for id {}", row.target_id);
-            }
-        },
-        CLAIM => {
-            let claim = ctx.db.claim_state()
+                .map(|e|
+                    Message::empire(row.username.clone(), e.name, row.text.clone())),
+        CLAIM =>
+            ctx.db.claim_state()
                 .entity_id()
                 .find(&row.target_id)
-                .map(|c| c.name);
-
-            if let Some(claim) = claim {
-                tx.send(Message::claim(row.username, claim, row.text)).unwrap();
-            } else {
-                eprintln!("no claim found for id {}", row.target_id);
-            }
-        },
-        REGION => tx.send(Message::chat(row.username, row.text)).unwrap(),
-        _ => (),
-    };
+                .map(|c|
+                    Message::claim(row.username.clone(), c.name, row.text.clone())),
+        REGION =>
+            Some(Message::chat(row.username.clone(), row.text.clone())),
+        _ => None,
+    }
 }
 
-fn on_moderation(ctx: &EventContext, row: &UserModerationState, tx: &UnboundedSender<Message>) {
+fn on_moderation(ctx: &EventContext, row: &UserModerationState) -> Option<Message> {
     let user = ctx.db.player_username_state()
         .entity_id()
         .find(&row.target_entity_id)
-        .map(|p| p.username);
+        .map_or_else(|| format!("{{{}}}", row.target_entity_id), |p| p.username);
 
-    if let Some(user) = user {
-        let message = match row.user_moderation_policy {
-            PermanentBlockLogin =>
-                Message::moderation(user, "logging in", "permanently"),
-            TemporaryBlockLogin =>
-                Message::moderation(user, "logging in", &as_expiry(row.expiration_time)),
-            BlockChat =>
-                Message::moderation(user, "chatting", &as_expiry(row.expiration_time)),
-            BlockConstruct =>
-                Message::moderation(user, "building", &as_expiry(row.expiration_time)),
-        };
-        tx.send(message).unwrap();
-    } else {
-        eprintln!("no player found for id {}", row.target_entity_id);
-    }
+    Some(match row.user_moderation_policy {
+        PermanentBlockLogin =>
+            Message::moderation(user, "logging in", "permanently"),
+        TemporaryBlockLogin =>
+            Message::moderation(user, "logging in", &as_expiry(row.expiration_time)),
+        BlockChat =>
+            Message::moderation(user, "chatting", &as_expiry(row.expiration_time)),
+        BlockConstruct =>
+            Message::moderation(user, "building", &as_expiry(row.expiration_time)),
+    })
 }
 
 fn as_expiry(expiry: Timestamp) -> String {
