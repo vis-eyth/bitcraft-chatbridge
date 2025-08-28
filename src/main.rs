@@ -137,24 +137,25 @@ async fn consume(mut rx: UnboundedReceiver<Message>, webhook_url: String) {
     let client = reqwest::Client::new();
 
     while let Some(msg) = rx.recv().await {
-        if let Message::Disconnect = &msg { break }
+        match &msg {
+            Message::Disconnect => { break }
+            Message::Chat { username, content } => {
+                println!("{}: {}", username, content);
+                if webhook_url.is_empty() {
+                    continue;
+                }
 
-        if let Message::Chat {username, content} = &msg {
-            println!("{}: {}", username, content);
-            if webhook_url.is_empty() {
-                continue;
-            }
+                let payload = serde_json::to_string(&msg).unwrap();
+                let response = client
+                    .post(&webhook_url)
+                    .header("Content-Type", "application/json")
+                    .body(payload)
+                    .send()
+                    .await;
 
-            let payload = serde_json::to_string(&msg).unwrap();
-            let response = client
-                .post(&webhook_url)
-                .header("Content-Type", "application/json")
-                .body(payload)
-                .send()
-                .await;
-
-            if !response.is_ok_and(|r| r.status().is_success()) {
-                eprintln!("failed to send message");
+                if !response.is_ok_and(|r| r.status().is_success()) {
+                    eprintln!("failed to send message");
+                }
             }
         }
     }
