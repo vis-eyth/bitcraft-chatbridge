@@ -146,17 +146,6 @@ async fn sieve(mut rx: UnboundedReceiver<DbUpdate>, tx: UnboundedSender<Message>
 
             tx.send(msg).unwrap();
         }
-
-
-        for claim in update.claim_state.deletes {
-            claims.remove(&claim.row.entity_id);
-        }
-        for empire in update.empire_state.deletes {
-            empires.remove(&empire.row.entity_id);
-        }
-        for player in update.player_username_state.deletes {
-            players.remove(&player.row.entity_id);
-        }
     }
 }
 
