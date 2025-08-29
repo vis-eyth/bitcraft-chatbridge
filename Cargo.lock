@@ -134,7 +134,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "bindings"
 version = "2025.8.26"
-source = "git+https://github.com/vis-eyth/bitcraft-bindings?rev=cf05a942a8a1e0abb2537445774ed30cd437f023#cf05a942a8a1e0abb2537445774ed30cd437f023"
+source = "git+https://github.com/vis-eyth/bitcraft-bindings?rev=8ad074a14582dfc1940df129d61746cc1c6682b2#8ad074a14582dfc1940df129d61746cc1c6682b2"
 dependencies = [
  "spacetimedb-sdk",
  "tokio",
@@ -1874,8 +1874,7 @@ dependencies = [
 [[package]]
 name = "spacetimedb-sdk"
 version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e9a4019f2fc93e21c64a5586ab6ec096a54a334983bd2c82497971f31d52e73"
+source = "git+https://github.com/vis-eyth/bitcraft-bindings?rev=20731118b55bb5373e8d701cc62558510ae37d7b#20731118b55bb5373e8d701cc62558510ae37d7b"
 dependencies = [
  "anymap",
  "base64 0.21.7",

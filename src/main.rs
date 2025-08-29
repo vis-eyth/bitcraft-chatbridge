@@ -1,12 +1,13 @@
+use std::collections::HashMap;
 use bindings::region::{*, UserModerationPolicy::*};
-use bindings::ext::{con::*, send::*};
+use bindings::ext::ctx::*;
 use bindings::sdk::{DbContext, Timestamp};
 
 mod glue;
 use glue::{Config, Configurable};
 
 use serde;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender, UnboundedReceiver};
 
 #[derive(serde::Serialize)]
 #[serde(untagged)]
@@ -21,11 +22,11 @@ enum Message {
 impl Message {
     pub fn chat(username: String, content: String) -> Self { Self::Chat{ username, content } }
 
-    pub fn claim(username: String, claim: String, content: String) -> Self {
+    pub fn claim(username: String, claim: &str, content: String) -> Self {
         Self::chat(format!("{} [{}]", username, claim), content)
     }
 
-    pub fn empire(username: String, empire: String, content: String) -> Self {
+    pub fn empire(username: String, empire: &str, content: String) -> Self {
         Self::chat(format!("{} [{}]", username, empire), content)
     }
 
@@ -46,9 +47,10 @@ async fn main() {
         return;
     }
 
-    let (tx, rx) = unbounded_channel::<Message>();
+    let (tx_ctx, rx_ctx) = unbounded_channel::<DbUpdate>();
+    let (tx_msg, rx_msg) = unbounded_channel::<Message>();
 
-    let tx_shutdown = tx.clone();
+    let tx_shutdown = tx_msg.clone();
     let ctx = DbConnection::builder()
         .configure(&config)
         .on_connect(|_, _, _| println!("connected!"))
@@ -56,11 +58,9 @@ async fn main() {
             println!("disconnected!");
             tx_shutdown.send(Message::Disconnect).unwrap();
         })
+        .with_channel(tx_ctx)
         .build()
         .expect("failed to connect");
-
-    ctx.db.chat_message_state().on_insert_send(&tx, on_message);
-    ctx.db.user_moderation_state().on_insert_send(&tx, on_moderation);
 
     let start = Timestamp::now();
     ctx.subscription_builder()
@@ -78,55 +78,86 @@ async fn main() {
                    WHERE t.created_time > '{}'", start),
     ]);
 
-    let (con, _) = tokio::join!(
+    let (con, _, _) = tokio::join!(
         tokio::spawn(ctx.run_until(tokio::signal::ctrl_c())),
-        tokio::spawn(consume(rx, config.webhook_url())),
+        tokio::spawn(sieve(rx_ctx, tx_msg)),
+        tokio::spawn(consume(rx_msg, config.webhook_url())),
     );
 
     if let Ok(Err(e)) = con { eprintln!("db error: {:?}", e); }
 }
 
-fn on_message(ctx: &EventContext, row: &ChatMessageState) -> Option<Message> {
+async fn sieve(mut rx: UnboundedReceiver<DbUpdate>, tx: UnboundedSender<Message>) {
     const EMPIRE_INTERNAL: i32 = ChatChannel::EmpireInternal as i32;
     const EMPIRE_PUBLIC: i32 = ChatChannel::EmpirePublic as i32;
     const CLAIM: i32 = ChatChannel::Claim as i32;
     const REGION: i32 = ChatChannel::Region as i32;
 
-    match row.channel_id {
-        EMPIRE_INTERNAL | EMPIRE_PUBLIC =>
-            ctx.db.empire_state()
-                .entity_id()
-                .find(&row.target_id)
-                .map(|e|
-                    Message::empire(row.username.clone(), e.name, row.text.clone())),
-        CLAIM =>
-            ctx.db.claim_state()
-                .entity_id()
-                .find(&row.target_id)
-                .map(|c|
-                    Message::claim(row.username.clone(), c.name, row.text.clone())),
-        REGION =>
-            Some(Message::chat(row.username.clone(), row.text.clone())),
-        _ => None,
+
+    let mut claims = HashMap::new();
+    let mut empires = HashMap::new();
+    let mut players = HashMap::new();
+
+
+    while let Some(update) = rx.recv().await {
+        for claim in update.claim_state.inserts {
+            claims.insert(claim.row.entity_id, claim.row.name);
+        }
+        for empire in update.empire_state.inserts {
+            empires.insert(empire.row.entity_id, empire.row.name);
+        }
+        for player in update.player_username_state.inserts {
+            players.insert(player.row.entity_id, player.row.username);
+        }
+
+        for msg in update.chat_message_state.inserts {
+            let msg = match msg.row.channel_id {
+                EMPIRE_INTERNAL | EMPIRE_PUBLIC =>
+                    empires
+                        .get(&msg.row.target_id)
+                        .map(|e| Message::empire(msg.row.username, e, msg.row.text)),
+                CLAIM =>
+                    claims
+                        .get(&msg.row.target_id)
+                        .map(|e| Message::claim(msg.row.username, e, msg.row.text)),
+                REGION =>
+                    Some(Message::chat(msg.row.username, msg.row.text)),
+                _ => None,
+            };
+
+            if let Some(msg) = msg { tx.send(msg).unwrap() }
+        }
+
+        for msg in update.user_moderation_state.inserts {
+            let user = players
+                .get(&msg.row.target_entity_id)
+                .map_or(format!("{{{}}}", msg.row.target_entity_id), &String::to_string);
+
+            let msg = match msg.row.user_moderation_policy {
+                PermanentBlockLogin =>
+                    Message::moderation(user, "logging in", "permanently"),
+                TemporaryBlockLogin =>
+                    Message::moderation(user, "logging in", &as_expiry(msg.row.expiration_time)),
+                BlockChat =>
+                    Message::moderation(user, "chatting", &as_expiry(msg.row.expiration_time)),
+                BlockConstruct =>
+                    Message::moderation(user, "building", &as_expiry(msg.row.expiration_time)),
+            };
+
+            tx.send(msg).unwrap();
+        }
+
+
+        for claim in update.claim_state.deletes {
+            claims.remove(&claim.row.entity_id);
+        }
+        for empire in update.empire_state.deletes {
+            empires.remove(&empire.row.entity_id);
+        }
+        for player in update.player_username_state.deletes {
+            players.remove(&player.row.entity_id);
+        }
     }
-}
-
-fn on_moderation(ctx: &EventContext, row: &UserModerationState) -> Option<Message> {
-    let user = ctx.db.player_username_state()
-        .entity_id()
-        .find(&row.target_entity_id)
-        .map_or_else(|| format!("{{{}}}", row.target_entity_id), |p| p.username);
-
-    Some(match row.user_moderation_policy {
-        PermanentBlockLogin =>
-            Message::moderation(user, "logging in", "permanently"),
-        TemporaryBlockLogin =>
-            Message::moderation(user, "logging in", &as_expiry(row.expiration_time)),
-        BlockChat =>
-            Message::moderation(user, "chatting", &as_expiry(row.expiration_time)),
-        BlockConstruct =>
-            Message::moderation(user, "building", &as_expiry(row.expiration_time)),
-    })
 }
 
 fn as_expiry(expiry: Timestamp) -> String {

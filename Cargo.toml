@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bindings = { git = "https://github.com/vis-eyth/bitcraft-bindings", rev = "cf05a942a8a1e0abb2537445774ed30cd437f023" }
+bindings = { git = "https://github.com/vis-eyth/bitcraft-bindings", rev = "8ad074a14582dfc1940df129d61746cc1c6682b2" }
 anyhow = { version = "1.0.98" }
 serde = { version = "1.0.219" }
 serde_json = { version = "1.0.142" }
